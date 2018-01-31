@@ -1,0 +1,194 @@
+#!/usr/bin/env python
+
+# system-integrity
+#
+# Copyright (C) 2018 Kano Computing Ltd.
+# License: http://www.gnu.org/licenses/gpl-2.0.txt GNU GPL v2
+
+"""
+system-integrity is a small tool to list modified debian packages.
+
+Usage:
+    system-integrity [options]
+    system-integrity -h | --help
+
+Options:
+    -e, --exclude-defaults
+                        Ignores files which are part of the known changed set
+                        on a released image (v3.14.1).
+    -k, --only-kano     Only check packages with names starting with 'kano'
+                        or 'make'. For testing purposes.
+    -h, --help          Show this message.
+"""
+
+
+import sys
+import json
+
+import docopt
+
+from kano.utils.shell import run_cmd
+
+
+RC_SUCCESS = 0
+RC_INCORRECT_ARGS = 1
+RC_FILES_MODIFIED = 2
+
+# These are the changed files reported on a first boot (after onboarding)
+# of a v3.14.1 released image.
+DEFAULT_MODS = {
+    "preload": [
+        "/etc/preload.conf"
+    ],
+    "systemd": [
+        "/etc/systemd/system.conf",
+        "/lib/systemd/system/systemd-fsck@.service",
+        "/lib/systemd/system/systemd-fsck-root.service"
+    ],
+    "kano-profile": [
+        "/usr/share/applications/defaults.list"
+    ],
+    "kano-desktop": [
+        "/etc/asound.conf"
+    ],
+    "procps": [
+        "/etc/sysctl.conf"
+    ],
+    "passwd": [
+        "/etc/default/useradd"
+    ],
+    "lightdm": [
+        "/etc/lightdm/lightdm.conf"
+    ],
+    "sudo": [
+        "/etc/sudoers"
+    ],
+    "openbox": [
+        "/etc/xdg/openbox/rc.xml"
+    ],
+    "lxde-common": [
+        "/etc/xdg/openbox/LXDE/rc.xml",
+        "/etc/xdg/lxsession/LXDE/autostart"
+    ],
+    "apt": [
+        "/etc/apt/apt.conf.d/01autoremove"
+    ],
+    "kano-video": [
+        "/usr/share/applications/auto_video-cli.desktop"
+    ],
+    "udev": [
+        "/etc/modprobe.d/fbdev-blacklist.conf",
+        "/lib/udev/rules.d/75-persistent-net-generator.rules"
+    ],
+    "initscripts": [
+        "/etc/network/if-up.d/mountnfs"
+    ],
+    "inetutils-syslogd": [
+        "/etc/syslog.conf",
+        "/etc/logrotate.d/inetutils-syslogd"
+    ],
+    "chromium-browser": [
+        "/etc/default/chromium-browser"
+    ],
+    "python-requests": [
+        "/usr/lib/python2.7/dist-packages/requests/api.py",
+        "/usr/lib/python2.7/dist-packages/requests/auth.py",
+        "/usr/lib/python2.7/dist-packages/requests/cookies.py",
+        "/usr/lib/python2.7/dist-packages/requests/hooks.py",
+        "/usr/lib/python2.7/dist-packages/requests/status_codes.py",
+        "/usr/lib/python2.7/dist-packages/requests/structures.py",
+        "/usr/lib/python2.7/dist-packages/requests/utils.py",
+        "/usr/lib/python2.7/dist-packages/requests/certs.py",
+        "/usr/lib/python2.7/dist-packages/requests/adapters.py",
+        "/usr/lib/python2.7/dist-packages/requests/models.py",
+        "/usr/lib/python2.7/dist-packages/requests/exceptions.py",
+        "/usr/lib/python2.7/dist-packages/requests/compat.py",
+        "/usr/lib/python2.7/dist-packages/requests/__init__.py",
+        "/usr/lib/python2.7/dist-packages/requests/sessions.py",
+        "/usr/lib/python2.7/dist-packages/requests/packages/__init__.py",
+        "/usr/lib/python2.7/dist-packages/requests/cacert.pem",
+        "/usr/lib/python2.7/dist-packages/requests-2.4.3.egg-info/requires.txt",
+        "/usr/lib/python2.7/dist-packages/requests-2.4.3.egg-info/PKG-INFO",
+        "/usr/lib/python2.7/dist-packages/requests-2.4.3.egg-info/not-zip-safe",
+        "/usr/lib/python2.7/dist-packages/requests-2.4.3.egg-info/top_level.txt",
+        "/usr/lib/python2.7/dist-packages/requests-2.4.3.egg-info/dependency_links.txt"
+    ],
+    "base-files": [
+        "/etc/issue"
+    ],
+    "login": [
+        "/etc/pam.d/login"
+    ],
+    "kano-init": [
+        "/usr/share/kano-init/systemd_ttys/kanoautologin@.service"
+    ],
+    "bash": [
+        "/etc/skel/.bashrc",
+        "/etc/bash.bashrc"
+    ]
+}
+
+
+def main(args):
+
+    modified = dict()
+
+    output, _, _ = run_cmd("dpkg-query --show -f '${binary:Package}\n'")
+    packages = output.strip().split('\n')
+
+    for package in packages:
+
+        # Option to skip "non-kano" packages. For testing purposes.
+        if args['--only-kano'] and not package.startswith(('kano', 'make')):
+            continue
+
+        sys.stdout.write('Verifying {}.. '.format(package))
+        sys.stdout.flush()
+        output, _, _ = run_cmd('dpkg --verify {}'.format(package))
+
+        if not output:
+            print 'ok.'
+            continue
+
+        # Parse the output of dpkg verify for a package, e.g.
+        # ??5??????   /usr/lib/python2.7/dist-packages/urllib3/__init__.py
+        # ??5?????? c /etc/bash.bashrc
+        modified_files = [
+            line.rsplit(' ', 1)[1]
+            for line in output.strip().split('\n')
+        ]
+
+        if args['--exclude-defaults']:
+            modified_files = list(
+                set(modified_files) - set(DEFAULT_MODS.get(package, list()))
+            )
+
+        if not modified_files:
+            print 'ok.'
+            continue
+
+        modified[package] = list()
+
+        print 'FAIL:'
+
+        for file in modified_files:
+            print '  ' + file
+            modified[package].append(file)
+
+    if modified:
+        print '\nThe following packages have changes:\n{}'.format(
+            json.dumps(modified, indent=4, sort_keys=True)
+        )
+        return RC_FILES_MODIFIED
+
+    print '\nAll packages are ok.'
+    return RC_SUCCESS
+
+
+if __name__ == "__main__":
+    try:
+        args = docopt.docopt(__doc__)
+    except docopt.DocoptExit:
+        print __doc__
+        sys.exit(RC_INCORRECT_ARGS)
+    sys.exit(main(args) or RC_SUCCESS)
